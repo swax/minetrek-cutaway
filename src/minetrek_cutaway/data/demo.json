@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "output": { "width": 960, "height": 540, "fps": 24, "background": [9, 17, 28] },
+  "renderer": { "backend": "gpu", "lighting": "studio" },
+  "sources": {
+    "room": {
+      "type": "synthetic",
+      "size": [32, 16, 24],
+      "boxes": [
+        { "bounds": [2, 30, 0, 1, 2, 22], "block": 43 },
+        { "bounds": [2, 3, 1, 5, 2, 22], "block": 1 },
+        { "bounds": [29, 30, 1, 5, 2, 22], "block": 1 },
+        { "bounds": [2, 30, 1, 5, 2, 3], "block": 1 },
+        { "bounds": [2, 30, 1, 5, 21, 22], "block": 1 },
+        { "bounds": [2, 30, 5, 6, 2, 22], "block": 43 },
+        { "bounds": [2, 3, 6, 10, 2, 22], "block": 1 },
+        { "bounds": [29, 30, 6, 10, 2, 22], "block": 1 },
+        { "bounds": [2, 30, 6, 10, 2, 3], "block": 1 },
+        { "bounds": [2, 30, 6, 10, 21, 22], "block": 1 },
+        { "bounds": [4, 16, 6, 9, 12, 13], "block": 5 },
+        { "bounds": [9, 11, 6, 8, 12, 13], "block": 0 },
+        { "bounds": [5, 11, 6, 7, 6, 9], "block": 44 },
+        { "bounds": [21, 26, 6, 7, 15, 19], "block": 21 },
+        { "bounds": [21, 24, 6, 7, 6, 9], "block": 41 },
+        { "bounds": [2, 30, 10, 11, 2, 22], "block": 43 }
+      ]
+    },
+    "opened": { "type": "derived", "base": "room", "mark_boxes": [[2, 30, 10, 11, 2, 22]] }
+  },
+  "overlays": {
+    "title": {
+      "stages": [
+        {
+          "mode": "over",
+          "draw": [{ "type": "rectangle", "bounds": [0, 0, 960, 56], "fill": [3, 8, 15, 170] }]
+        },
+        {
+          "mode": "draw",
+          "draw": [
+            {
+              "type": "text",
+              "position": [24, 14],
+              "text": "MineTrek Cutaway · a synthetic example",
+              "font": "default",
+              "size": 25,
+              "fill": [225, 234, 240]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "shots": [
+    {
+      "source": "opened",
+      "duration": 2,
+      "camera": { "azimuth": [-55, -35], "elevation": 40 },
+      "clip": { "height": 16, "sweep_x": [1, 33] },
+      "overlay": "title"
+    },
+    {
+      "source": "opened",
+      "duration": 2,
+      "camera": { "azimuth": [-35, 10], "elevation": 40 },
+      "clip": { "height": 16, "sweep_x": 33 },
+      "overlay": "title",
+      "transition": 0.5
+    },
+    {
+      "source": "room",
+      "duration": 2,
+      "camera": { "azimuth": [10, 35], "elevation": 40 },
+      "clip": { "height": 5 },
+      "overlay": "title"
+    }
+  ]
+}

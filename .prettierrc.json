@@ -1,0 +1,9 @@
+{
+  "plugins": ["prettier-plugin-toml"],
+  "printWidth": 100,
+  "tabWidth": 2,
+  "endOfLine": "lf",
+  "proseWrap": "preserve",
+  "embeddedLanguageFormatting": "off",
+  "overrides": [{ "files": ".clang-format", "options": { "parser": "yaml" } }]
+}

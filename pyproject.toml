@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minetrek-cutaway"
+version = "0.2.0"
+description = "MineTrek Cutaway Renderer: configuration-driven Minecraft Classic cutaways, deck tours and time lapses"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["numpy>=2.0,<3", "Pillow>=10.2,<13"]
+
+[project.scripts]
+minetrek-cutaway = "minetrek_cutaway.cli:main"
+classic-cutaway = "minetrek_cutaway.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["minetrek_cutaway*"]
+
+[tool.setuptools.package-data]
+minetrek_cutaway = ["engine/csharp/*.cs", "engine/shaders/*.comp", "data/*.json"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+cache-dir = "work/ruff-cache"
+extend-exclude = ["work", "node_modules", ".venv", "build", "dist"]
+force-exclude = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = false

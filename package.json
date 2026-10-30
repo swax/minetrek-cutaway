@@ -1,0 +1,13 @@
+{
+  "name": "minetrek-cutaway-development",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "format": "python scripts/format_code.py",
+    "format:check": "python scripts/format_code.py --check"
+  },
+  "devDependencies": {
+    "prettier": "3.9.10",
+    "prettier-plugin-toml": "4.1.0"
+  }
+}

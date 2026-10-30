@@ -1,0 +1,7 @@
+work/
+node_modules/
+.git/
+.venv/
+build/
+dist/
+__pycache__/

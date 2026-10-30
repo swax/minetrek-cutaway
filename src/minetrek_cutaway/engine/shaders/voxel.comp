@@ -1,0 +1,337 @@
+#version 430
+#ifndef LIGHTING_STYLE
+#define LIGHTING_STYLE 0
+#endif
+// The CPU DeckOrbitRenderer algorithm, evaluated per pixel on the GPU.
+layout(local_size_x = 16, local_size_y = 8) in;
+layout(binding = 0, rgba8) writeonly uniform image2D outputImage;
+layout(binding = 1) uniform usampler3D blocks;
+layout(binding = 2) uniform usampler3D coarse;
+layout(binding = 3) uniform sampler2DArray terrain;
+uniform vec3 palette[256];
+uniform ivec3 tileFaces[50];
+uniform dvec4 p[11];
+
+// Optional bit-7 selection mask for configurable progressive block removal.
+uint rawBlock(ivec3 b) {
+    return texelFetch(blocks, b.xzy, 0).r;
+}
+uint blockId(ivec3 b) {
+    return (int(p[8].w) & 4) != 0 ? rawBlock(b) & 127u : rawBlock(b);
+}
+
+bool world(ivec3 b) {
+    return b.x >= p[4].x && b.x < p[4].y && b.y >= p[9].x && b.y < p[9].y && b.z >= p[4].z &&
+           b.z < p[4].w;
+}
+bool solid(ivec3 b) {
+    if (b.x < p[4].x || b.x >= p[4].y || b.z < p[4].z || b.z >= p[4].w || !world(b))
+        return false;
+    if (p[8].x == 1.0 && b.y < p[1].w)
+        return false;
+    bool opened = double(b.x) + .5 >= p[3].w;
+    dvec4 limits = opened ? p[5] : p[6];
+    if (p[8].x == 2.0 && b.y >= p[1].w &&
+        (b.x < limits.x || b.x >= limits.y || b.z < limits.z || b.z >= limits.w))
+        return false;
+    if ((int(p[8].w) & 4) != 0 && rawBlock(b) >= 128u && double(b.x) + .5 < p[3].w)
+        return false;
+    return b.y < (opened ? p[7].x : p[7].y) && blockId(b) != 0u;
+}
+double nextStep(double o, double d, int coordinate, int jump) {
+    if (abs(d) < 1e-10)
+        return 1e30;
+    return (double((coordinate / jump + (d > 0.0 ? 1 : 0)) * jump) - o) / d;
+}
+bool slab(double o, double d, double lo, double hi, int axis, inout double nearT, inout double farT,
+          inout int hitAxis);
+bool halfSlab(ivec3 b) {
+    return (int(p[8].w) & 1) == 0 && blockId(b) == 44u;
+}
+bool solidAt(dvec3 q) {
+    ivec3 b = ivec3(floor(q));
+    return solid(b) && (!halfSlab(b) || q.y - double(b.y) < .5);
+}
+bool blockHit(ivec3 b, dvec3 o, dvec3 d, inout double t, inout int axis) {
+    if (!halfSlab(b))
+        return true;
+    double nearT = -1e30, farT = 1e30;
+    int face = 1;
+    if (!slab(o.x, d.x, b.x, double(b.x) + 1.0, 0, nearT, farT, face) ||
+        !slab(o.y, d.y, b.y, double(b.y) + .5, 1, nearT, farT, face) ||
+        !slab(o.z, d.z, b.z, double(b.z) + 1.0, 2, nearT, farT, face) || farT <= t)
+        return false;
+    if (nearT >= t - .000002) {
+        t = nearT + .000001;
+        axis = face;
+    }
+    return true;
+}
+bool opaqueAt(uint id, int axis, dvec3 d, dvec3 q) {
+    if ((int(p[8].w) & 2) == 0 || id >= 50u)
+        return true;
+    q -= floor(q);
+    double u = axis == 0 ? q.z : q.x, v = axis == 1 ? q.z : 1.0 - q.y;
+    if (axis == 0 && d.x < 0.0)
+        u = 1.0 - u;
+    if (axis == 2 && d.z > 0.0)
+        u = 1.0 - u;
+    if (axis == 1 && d.y > 0.0)
+        v = 1.0 - v;
+    int tile = axis == 1 ? (d.y < 0.0 ? tileFaces[id].x : tileFaces[id].z) : tileFaces[id].y;
+    int side = textureSize(terrain, 0).x;
+    ivec2 pixel = clamp(ivec2(dvec2(u, v) * side), ivec2(0), ivec2(side - 1));
+    return texelFetch(terrain, ivec3(pixel, tile), 0).a >= .5;
+}
+
+// Pixel-footprint filtering of premultiplied window RGB and coverage.
+vec4 windowSample(int axis, dvec3 d, dvec3 q, dvec3 originR, dvec3 originU) {
+    q -= floor(q);
+    double u = axis == 0 ? q.z : q.x, v = axis == 1 ? q.z : 1.0 - q.y;
+    if (axis == 0 && d.x < 0.0)
+        u = 1.0 - u;
+    if (axis == 2 && d.z > 0.0)
+        u = 1.0 - u;
+    if (axis == 1 && d.y > 0.0)
+        v = 1.0 - v;
+    dvec3 dr = originR - d * (originR[axis] / d[axis]);
+    dvec3 du = originU - d * (originU[axis] / d[axis]);
+    dvec2 uvR = dvec2(axis == 0 ? dr.z : dr.x, axis == 1 ? dr.z : dr.y);
+    dvec2 uvU = dvec2(axis == 0 ? du.z : du.x, axis == 1 ? du.z : du.y);
+    double footprint = max(length(uvR), length(uvU));
+    float lod = log2(float(max(1e-12, double(textureSize(terrain, 0).x) * footprint)));
+    return textureLod(terrain, vec3(float(u), float(v), 49.0), lod);
+}
+bool internalGlassFace(ivec3 b, int axis, dvec3 d) {
+    ivec3 n = ivec3(0);
+    n[axis] = d[axis] > 0.0 ? -1 : 1;
+    return solid(b + n) && blockId(b + n) == 20u;
+}
+void storeCoverage(ivec2 pixel, dvec3 sum, double remaining) {
+    double alpha = 1.0 - remaining;
+    dvec3 rgb = alpha > 1e-8 ? sum / alpha : dvec3(0);
+    imageStore(outputImage, pixel,
+               vec4(vec3(floor(clamp(rgb, dvec3(0), dvec3(255)))) / 255.0, float(alpha)));
+}
+
+float shadowNext(float o, float d, int coordinate, int jump) {
+    if (abs(d) < 1e-8)
+        return 1e30;
+    return (float((coordinate / jump + (d > 0.0 ? 1 : 0)) * jump) - o) / d;
+}
+double shadow(dvec3 origin, dvec3 direction, dvec3 originR, dvec3 originU) {
+    vec3 o = vec3(origin), d = vec3(direction);
+    float t = .001;
+    int axis = 1;
+    double remaining = 1.0;
+    for (int i = 0; i < int(p[10].y) && t < float(p[9].w); i++) {
+        vec3 q = o + d * t;
+        if (q.x < float(p[4].x) || q.x >= float(p[4].y) || q.z < float(p[4].z) ||
+            q.z >= float(p[4].w) || q.y < float(p[9].x) ||
+            q.y >= float(min(p[9].y, max(p[7].x, p[7].y))))
+            return 1.0 - remaining;
+        ivec3 b = ivec3(q);
+        int jump = texelFetch(coarse, b.xzy >> 3, 0).r == 0u ? 8 : 1;
+        double shapeT = double(t);
+        if (jump == 1 && solid(b) && blockHit(b, dvec3(o), dvec3(d), shapeT, axis)) {
+            uint id = blockId(b);
+            dvec3 hit = dvec3(o) + dvec3(d) * shapeT;
+            if (id == 20u && (int(p[8].w) & 2) != 0) {
+                if (!internalGlassFace(b, axis, dvec3(d))) {
+                    remaining *=
+                        1.0 - double(windowSample(axis, dvec3(d), hit, originR, originU).a);
+                    if (remaining < .002)
+                        return 1.0 - remaining;
+                }
+            } else if (opaqueAt(id, axis, dvec3(d), hit))
+                return 1.0;
+        }
+        float tx = shadowNext(o.x, d.x, b.x, jump), ty = shadowNext(o.y, d.y, b.y, jump),
+              tz = shadowNext(o.z, d.z, b.z, jump);
+        if (tx < ty && tx < tz) {
+            t = tx + .0002;
+            axis = 0;
+        } else if (ty < tz) {
+            t = ty + .0002;
+            axis = 1;
+        } else {
+            t = tz + .0002;
+            axis = 2;
+        }
+    }
+    return 1.0 - remaining;
+}
+bool slab(double o, double d, double lo, double hi, int axis, inout double nearT, inout double farT,
+          inout int hitAxis) {
+    if (abs(d) < 1e-10)
+        return o >= lo && o < hi;
+    double a = (lo - o) / d, b = (hi - o) / d;
+    if (a > b) {
+        double tmp = a;
+        a = b;
+        b = tmp;
+    }
+    if (a > nearT) {
+        nearT = a;
+        hitAxis = axis;
+    }
+    farT = min(farT, b);
+    return nearT < farT;
+}
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy) + ivec2(p[8].yz);
+    if (pixel.x >= int(p[7].z) || pixel.y >= int(p[7].w))
+        return;
+    imageStore(outputImage, pixel, vec4(0));
+    double px = (double(pixel.x) + .5 - p[7].z / 2.0) / p[0].w;
+    double py = (p[7].w / 2.0 - double(pixel.y) - .5) / p[0].w;
+    dvec3 d = p[1].xyz;
+    dvec3 o = p[0].xyz + p[2].xyz * px + p[3].xyz * py - d * p[9].z;
+    double ymin = p[8].x == 1.0 ? max(p[9].x, p[1].w) : p[9].x;
+    double ymax = min(p[9].y, max(p[7].x, p[7].y));
+    double nearT = -1e30, farT = 1e30;
+    int axis = 1;
+    if (!slab(o.x, d.x, p[4].x, p[4].y, 0, nearT, farT, axis) ||
+        !slab(o.y, d.y, ymin, ymax, 1, nearT, farT, axis) ||
+        !slab(o.z, d.z, p[4].z, p[4].w, 2, nearT, farT, axis))
+        return;
+    double t = nearT + .000001;
+    dvec3 sum = dvec3(0);
+    double remaining = 1.0;
+    dvec3 pixelR = p[2].xyz / p[0].w, pixelU = p[3].xyz / p[0].w;
+    for (int iter = 0; iter < int(p[10].x) && t < farT; iter++) {
+        dvec3 q = o + d * t;
+        if (q.x < p[4].x || q.x >= p[4].y || q.y < ymin || q.y >= ymax || q.z < p[4].z ||
+            q.z >= p[4].w)
+            break;
+        ivec3 b = ivec3(q);
+        int jump = texelFetch(coarse, b.xzy >> 3, 0).r == 0u ? 8 : 1;
+        if (jump == 1 && solid(b) && blockHit(b, o, d, t, axis)) {
+            uint id = blockId(b);
+            q = o + d * t;
+            bool isWindow = id == 20u && (int(p[8].w) & 2) != 0;
+            vec4 window = isWindow ? windowSample(axis, d, q, pixelR, pixelU) : vec4(0);
+            double coverage = isWindow ? double(window.a) : 1.0;
+            if ((isWindow && (coverage < .00001 || internalGlassFace(b, axis, d))) ||
+                (!isWindow && !opaqueAt(id, axis, d, q))) {
+                double tx = nextStep(o.x, d.x, b.x, jump), ty = nextStep(o.y, d.y, b.y, jump),
+                       tz = nextStep(o.z, d.z, b.z, jump);
+                if (tx < ty && tx < tz) {
+                    t = tx + .000001;
+                    axis = 0;
+                } else if (ty < tz) {
+                    t = ty + .000001;
+                    axis = 1;
+                } else {
+                    t = tz + .000001;
+                    axis = 2;
+                }
+                continue;
+            }
+            ivec3 n =
+                ivec3(axis == 0 ? (d.x > 0.0 ? -1 : 1) : 0, axis == 1 ? (d.y > 0.0 ? -1 : 1) : 0,
+                      axis == 2 ? (d.z > 0.0 ? -1 : 1) : 0);
+            double diffuse = max(0.0, dot(dvec3(n), dvec3(-.38, .76, -.53)));
+            double blocked = 0;
+            dvec3 receiverR = pixelR - d * (pixelR[axis] / d[axis]);
+            dvec3 receiverU = pixelU - d * (pixelU[axis] / d[axis]);
+            if (diffuse > 0.0)
+                for (int k = 0; k < 4; k++) {
+                    dvec3 light = dvec3(-.38 + ((k & 1) == 0 ? -.16 : .16),
+                                        .76 + ((k & 2) == 0 ? -.16 : .16), -.53);
+                    blocked +=
+                        shadow(q + dvec3(n) * .02, light / length(light), receiverR, receiverU);
+                }
+            double vis = 1.0 - .55 * double(blocked) / 4.0;
+            int neighbors = 0;
+            for (int v = -1; v <= 1; v++)
+                for (int r = -1; r <= 1; r++) {
+                    if (v == 0 && r == 0)
+                        continue;
+                    dvec3 a =
+                        axis == 0
+                            ? dvec3(q.x + double(n.x) * .02, q.y + v, double(b.z + r) + .5)
+                            : (axis == 1
+                                   ? dvec3(double(b.x + v) + .5, q.y + double(n.y) * .02,
+                                           double(b.z + r) + .5)
+                                   : dvec3(double(b.x + v) + .5, q.y + r, q.z + double(n.z) * .02));
+                    if (solidAt(a))
+                        neighbors++;
+                }
+            double shade = 1.0 - .34 * double(neighbors) / 8.0;
+            double u = axis == 0 ? q.z - b.z : q.x - b.x, v = axis == 1 ? q.z - b.z : q.y - b.y;
+            double vMax = axis != 1 && halfSlab(b) ? .5 : 1.0;
+            if (u < .045 || u > .955 || v < .045 || v > vMax - .045)
+                shade *= .90;
+            int hash = (b.x * 73856093) ^ (b.y * 19349663) ^ (b.z * 83492791);
+            shade *= .97 + double(hash & 255) / 255.0 * .06;
+            dvec3 color = isWindow ? dvec3(window.rgb) * 255.0 / coverage : dvec3(palette[id]);
+            if ((int(p[8].w) & 2) != 0 && id < 50u && !isWindow) {
+                double tu = u, tv = 1.0 - v;
+                if (axis == 0 && n.x > 0)
+                    tu = 1.0 - tu;
+                if (axis == 2 && n.z < 0)
+                    tu = 1.0 - tu;
+                if (axis == 1)
+                    tv = n.y > 0 ? v : 1.0 - v;
+                int tile =
+                    axis == 1 ? (n.y > 0 ? tileFaces[id].x : tileFaces[id].z) : tileFaces[id].y;
+                double da = d[axis];
+                dvec3 dr = p[2].xyz - d * (p[2][axis] / da), du = p[3].xyz - d * (p[3][axis] / da);
+                dvec2 uvR = dvec2(axis == 0 ? dr.z : dr.x, axis == 1 ? dr.z : dr.y);
+                dvec2 uvU = dvec2(axis == 0 ? du.z : du.x, axis == 1 ? du.z : du.y);
+                double footprint = max(length(uvR), length(uvU)) / p[0].w;
+                float lod = log2(float(max(1e-12, double(textureSize(terrain, 0).x) * footprint)));
+                color =
+                    dvec3(textureLod(terrain, vec3(float(tu), float(tv), float(tile)), lod).rgb) *
+                    255.0;
+            }
+#if LIGHTING_STYLE == 1
+            dvec3 value = color * shade * dvec3(1.0);
+#elif LIGHTING_STYLE == 2
+            dvec3 value =
+                color * shade *
+                    (.26 * dvec3(.65, .78, 1.0) + .94 * diffuse * vis * dvec3(1.0, .88, .70)) *
+                    1.15 +
+                3.0;
+#else
+            dvec3 value =
+                color * shade *
+                    (.54 * dvec3(.87, .93, 1.0) + .64 * diffuse * vis * dvec3(1.0, .97, .93)) *
+                    1.15 +
+                3.0;
+#endif
+            double alpha = 1.0;
+            if (p[8].x == 2.0) {
+                double focus = clamp((double(b.y) + 1.0 - p[1].w) / .8, 0.0, 1.0);
+                dvec4 limits = double(b.x) + .5 >= p[3].w ? p[5] : p[6];
+                double ax = max(0.0, max(limits.x - b.x, double(b.x) + 1.0 - limits.y));
+                double az = max(0.0, max(limits.z - b.z, double(b.z) + 1.0 - limits.w));
+                double context = p[2].w * double(exp(float(-max(0.0, p[1].w - b.y) / 12.0 -
+                                                           sqrt(ax * ax + az * az) / 18.0)));
+                alpha = context + (1.0 - context) * focus;
+            }
+            alpha *= coverage;
+            sum += remaining * alpha * clamp(value, dvec3(0), dvec3(255));
+            remaining *= 1.0 - alpha;
+            if (!isWindow || remaining < .002) {
+                storeCoverage(pixel, sum, remaining);
+                return;
+            }
+            // Continue through the pane to reveal the scene behind it.
+        }
+        double tx = nextStep(o.x, d.x, b.x, jump), ty = nextStep(o.y, d.y, b.y, jump),
+               tz = nextStep(o.z, d.z, b.z, jump);
+        if (tx < ty && tx < tz) {
+            t = tx + .000001;
+            axis = 0;
+        } else if (ty < tz) {
+            t = ty + .000001;
+            axis = 1;
+        } else {
+            t = tz + .000001;
+            axis = 2;
+        }
+    }
+    storeCoverage(pixel, sum, remaining);
+}
